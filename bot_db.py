@@ -5,7 +5,7 @@ from datetime import datetime, timedelta
 import time
 import threading
 import requests
-from flask import Flask, request, jsonify
+from flask import Flask
 
 # ================== تنظیمات ==================
 GROQ_API_KEY = os.environ.get("GROQ_API_KEY")
@@ -278,32 +278,6 @@ def get_crime_keyboard():
         keyboard["inline_keyboard"].append([{"text": f"🔹 {name}", "callback_data": f"select_{name}"}])
     return keyboard
 
-# ================== پردازش پیام‌ها ==================
-def handle_message(chat_id, text, user_id, username, first_name, last_name):
-    user = get_user(user_id)
-    if not user:
-        create_user(user_id, username, first_name, last_name)
-        send_telegram_message(chat_id, welcome_message(), get_main_keyboard())
-        return
-    
-    if text.startswith('/start'):
-        send_telegram_message(chat_id, welcome_message(), get_main_keyboard())
-        return
-    
-    # بررسی اینکه کاربر به کدام جرم دسترسی دارد
-    purchased = get_purchased_crimes(user_id)
-    trial_crime, trial_remaining = get_trial_status(user_id)
-    
-    if purchased:
-        send_telegram_message(chat_id, f"✅ شما به {len(purchased)} جرم دسترسی دارید. سوال خود را بپرسید.", get_main_keyboard())
-        return
-    
-    if trial_crime and trial_remaining and trial_remaining.total_seconds() > 0:
-        send_telegram_message(chat_id, f"⏳ شما در حال آزمون جرم *{trial_crime}* هستید. {trial_remaining.days} روز و {trial_remaining.seconds//3600} ساعت باقی مانده.", get_main_keyboard())
-        return
-    
-    send_telegram_message(chat_id, "⚠️ شما دسترسی به هیچ جرمی ندارید. لطفاً ابتدا یک جرم را خریداری کنید یا آزمون ۳ روزه را شروع کنید.", get_crime_keyboard())
-
 def welcome_message():
     return """⚖️ *دستیار حقوقی وکلای افرا*
 
@@ -327,6 +301,124 @@ def welcome_message():
 
 از دکمه‌های زیر برای شروع استفاده کنید:
 """
+
+# ================== پردازش دکمه‌ها ==================
+def handle_callback_query(chat_id, user_id, data):
+    user = get_user(user_id)
+    if not user:
+        create_user(user_id, "", "", "")
+        send_telegram_message(chat_id, welcome_message(), get_main_keyboard())
+        return
+    
+    # دکمه: لیست جرایم
+    if data == "list_crimes":
+        send_telegram_message(chat_id, get_crime_list(), get_crime_keyboard())
+        return
+    
+    # دکمه: وضعیت آزمون
+    if data == "my_trial":
+        trial_crime, trial_remaining = get_trial_status(user_id)
+        purchased = get_purchased_crimes(user_id)
+        
+        text = "📊 *وضعیت شما:*\n\n"
+        
+        if purchased:
+            text += f"✅ جرایم خریداری‌شده: {', '.join(purchased)}\n\n"
+        
+        if trial_crime and trial_remaining and trial_remaining.total_seconds() > 0:
+            days = trial_remaining.days
+            hours = trial_remaining.seconds // 3600
+            text += f"⏳ آزمون جرم *{trial_crime}*: {days} روز و {hours} ساعت باقی مانده"
+        else:
+            text += "❌ هیچ آزمون فعالی ندارید.\n"
+            text += "💡 یک جرم را برای آزمون ۳ روزه انتخاب کنید."
+        
+        send_telegram_message(chat_id, text, get_crime_keyboard())
+        return
+    
+    # دکمه: خرید جرم
+    if data == "buy_crime":
+        purchased = get_purchased_crimes(user_id)
+        text = "🛒 *خرید جرم*\n\n"
+        text += "لطفاً جرم مورد نظر خود را انتخاب کنید:\n\n"
+        
+        for name, info in CRIMES.items():
+            status = "✅" if name in purchased else "❌"
+            text += f"{info['emoji']} {name} {status}\n"
+        
+        send_telegram_message(chat_id, text, get_crime_keyboard())
+        return
+    
+    # دکمه: پشتیبانی
+    if data == "support":
+        text = "📞 *ارتباط با پشتیبانی*\n\n"
+        text += "برای ارتباط با تیم پشتیبانی، از راه‌های زیر استفاده کنید:\n"
+        text += "📱 تلگرام: @AfraSupport\n"
+        text += "📧 ایمیل: support@afra.ir\n"
+        text += "📞 تلفن: ۰۲۱-XXXX-XXXX"
+        send_telegram_message(chat_id, text, get_main_keyboard())
+        return
+    
+    # انتخاب جرم برای آزمون یا خرید
+    for crime_name in CRIMES.keys():
+        if data == f"select_{crime_name}":
+            purchased = get_purchased_crimes(user_id)
+            
+            # اگر قبلاً خریداری شده
+            if crime_name in purchased:
+                send_telegram_message(chat_id, f"✅ شما قبلاً جرم *{crime_name}* را خریداری کرده‌اید و دسترسی کامل دارید.", get_main_keyboard())
+                return
+            
+            # بررسی آزمون فعال
+            trial_crime, trial_remaining = get_trial_status(user_id)
+            if trial_crime and trial_remaining and trial_remaining.total_seconds() > 0:
+                if trial_crime == crime_name:
+                    send_telegram_message(chat_id, f"⏳ شما در حال آزمون جرم *{crime_name}* هستید. {trial_remaining.days} روز و {trial_remaining.seconds//3600} ساعت باقی مانده.", get_main_keyboard())
+                    return
+                else:
+                    send_telegram_message(chat_id, f"⚠️ شما در حال آزمون جرم *{trial_crime}* هستید. برای آزمون جرم جدید، ابتدا صبر کنید تا آزمون فعلی تمام شود.", get_main_keyboard())
+                    return
+            
+            # شروع آزمون جدید
+            start_trial(user_id, crime_name)
+            send_telegram_message(chat_id, f"✅ آزمون ۳ روزه جرم *{crime_name}* شروع شد!\n\nاز امروز به مدت ۳ روز می‌توانید سوالات خود را بپرسید.", get_main_keyboard())
+            return
+    
+    send_telegram_message(chat_id, "❌ گزینه نامعتبر. لطفاً از دکمه‌ها استفاده کنید.", get_main_keyboard())
+
+# ================== پردازش پیام‌ها ==================
+def handle_message(chat_id, text, user_id, username, first_name, last_name):
+    user = get_user(user_id)
+    if not user:
+        create_user(user_id, username, first_name, last_name)
+        send_telegram_message(chat_id, welcome_message(), get_main_keyboard())
+        return
+    
+    if text.startswith('/start'):
+        send_telegram_message(chat_id, welcome_message(), get_main_keyboard())
+        return
+    
+    # بررسی دسترسی کاربر
+    purchased = get_purchased_crimes(user_id)
+    trial_crime, trial_remaining = get_trial_status(user_id)
+    
+    # اگر کاربر جرم خریداری شده دارد
+    if purchased:
+        crime = purchased[0]
+        send_telegram_message(chat_id, f"⏳ در حال تحلیل پرونده بر اساس جرم *{crime}*...")
+        response = get_groq_response(text, crime)
+        send_telegram_message(chat_id, response, get_main_keyboard())
+        return
+    
+    # اگر کاربر در حال آزمون است
+    if trial_crime and trial_remaining and trial_remaining.total_seconds() > 0:
+        send_telegram_message(chat_id, f"⏳ در حال تحلیل پرونده بر اساس جرم *{trial_crime}*... (آزمون)")
+        response = get_groq_response(text, trial_crime)
+        send_telegram_message(chat_id, response, get_main_keyboard())
+        return
+    
+    # کاربر دسترسی ندارد
+    send_telegram_message(chat_id, "⚠️ شما دسترسی به هیچ جرمی ندارید.\n\n💡 ابتدا یک جرم را برای آزمون ۳ روزه انتخاب کنید یا خریداری نمایید.", get_crime_keyboard())
 
 # ================== Flask Routes ==================
 @app.route('/')
@@ -369,9 +461,7 @@ def bot_polling():
                         chat_id = query["message"]["chat"]["id"]
                         user_id = query["from"]["id"]
                         data = query["data"]
-                        
-                        # پاسخ به دکمه‌ها
-                        send_telegram_message(chat_id, f"📌 شما انتخاب کردید: {data}")
+                        handle_callback_query(chat_id, user_id, data)
             
             time.sleep(1)
             
